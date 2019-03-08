@@ -21,6 +21,8 @@ import yaml
 
 from .. import dsl
 from ._k8s_helper import K8sHelper
+from ._op_to_template import _op_to_template
+
 
 class Compiler(object):
   """DSL Compiler.
@@ -233,137 +235,6 @@ class Compiler(object):
                                        processed_args[i])
     return processed_args
 
-  def _op_to_template(self, op):
-    """Generate template given an operator inherited from dsl.ContainerOp."""
-
-    def _build_conventional_artifact(name, path):
-      return {
-        'name': name,
-        'path': path,
-        's3': {
-          # TODO: parameterize namespace for minio service
-          'endpoint': 'minio-service.kubeflow:9000',
-          'bucket': 'mlpipeline',
-          'key': 'runs/{{workflow.uid}}/{{pod.name}}/' + name + '.tgz',
-          'insecure': True,
-          'accessKeySecret': {
-            'name': 'mlpipeline-minio-artifact',
-            'key': 'accesskey',
-          },
-          'secretKeySecret': {
-            'name': 'mlpipeline-minio-artifact',
-            'key': 'secretkey'
-          }
-        },
-      }
-
-    processed_arguments = self._process_args(op.arguments, op.argument_inputs)
-    processed_command = self._process_args(op.command, op.argument_inputs)
-
-    input_parameters = []
-    for param in op.inputs:
-      one_parameter = {'name': self._pipelineparam_full_name(param)}
-      if param.value:
-        one_parameter['value'] = str(param.value)
-      input_parameters.append(one_parameter)
-    # Sort to make the results deterministic.
-    input_parameters.sort(key=lambda x: x['name'])
-
-    output_parameters = []
-    for param in op.outputs.values():
-      output_parameters.append({
-        'name': self._pipelineparam_full_name(param),
-        'valueFrom': {'path': op.file_outputs[param.name]}
-      })
-    output_parameters.sort(key=lambda x: x['name'])
-
-    template = {
-      'name': op.name,
-      'container': {
-        'image': op.image,
-      }
-    }
-    if processed_arguments:
-      template['container']['args'] = processed_arguments
-    if processed_command:
-      template['container']['command'] = processed_command
-    if input_parameters:
-      template['inputs'] = {'parameters': input_parameters}
-
-    template['outputs'] = {}
-    if output_parameters:
-      template['outputs'] = {'parameters': output_parameters}
-
-    # Generate artifact for metadata output
-    # The motivation of appending the minio info in the yaml
-    # is to specify a unique path for the metadata.
-    # TODO: after argo addresses the issue that configures a unique path
-    # for the artifact output when default artifact repository is configured,
-    # this part needs to be updated to use the default artifact repository.
-    output_artifacts = []
-    output_artifacts.append(_build_conventional_artifact('mlpipeline-ui-metadata', '/mlpipeline-ui-metadata.json'))
-    output_artifacts.append(_build_conventional_artifact('mlpipeline-metrics', '/mlpipeline-metrics.json'))
-    template['outputs']['artifacts'] = output_artifacts
-
-    # Set resources.
-    if op.resource_limits or op.resource_requests:
-      template['container']['resources'] = {}
-    if op.resource_limits:
-      template['container']['resources']['limits'] = op.resource_limits
-    if op.resource_requests:
-      template['container']['resources']['requests'] = op.resource_requests
-
-    # Set nodeSelector.
-    if op.node_selector:
-      template['nodeSelector'] = op.node_selector
-
-    if op.env_variables:
-      template['container']['env'] = list(map(K8sHelper.convert_k8s_obj_to_json, op.env_variables))
-    if op.volume_mounts:
-      template['container']['volumeMounts'] = list(map(K8sHelper.convert_k8s_obj_to_json, op.volume_mounts))
-
-    if op.pod_annotations or op.pod_labels:
-      template['metadata'] = {}
-      if op.pod_annotations:
-        template['metadata']['annotations'] = op.pod_annotations
-      if op.pod_labels:
-        template['metadata']['labels'] = op.pod_labels
-
-    if op.num_retries:
-      template['retryStrategy'] = {'limit': op.num_retries}
-
-    if op.sidecars:
-      def _sidecar_to_template(tsidecar):
-          index, sidecar = tsidecar
-          sidecar_template = {
-            'name': '{}-{}-{}'.format(op.name, sidecar.name, index),
-            'image': sidecar.image
-          }
-          sidecar_processed_arguments = self._process_args(op.arguments, op.argument_inputs)
-          sidecar_processed_command = self._process_args(op.command, op.argument_inputs)
-          if sidecar_processed_arguments:
-            sidecar_template['args'] = sidecar_processed_arguments
-          if sidecar_processed_command:
-            sidecar_template['command'] = sidecar_processed_command
-          # Set resources.
-          if sidecar.resource_limits or sidecar.resource_requests:
-            sidecar_template['resources'] = {}
-          if sidecar.resource_limits:
-            sidecar_template['resources']['limits'] = sidecar.resource_limits
-          if sidecar.resource_requests:
-            sidecar_template['resources']['requests'] = sidecar.resource_requests
-          # env variables
-          if sidecar.env_variables:
-            sidecar_template['env'] = list(map(K8sHelper.convert_k8s_obj_to_json, sidecar.env_variables))
-          # volume mounts
-          if sidecar.volume_mounts:
-            sidecar_template['volumeMounts'] = list(map(K8sHelper.convert_k8s_obj_to_json, sidecar.volume_mounts))
-          return sidecar_template
-  
-      template['sidecars'] = list(map(_sidecar_to_template, enumerate(op.sidecars)))
-
-    return template
-
   def _group_to_template(self, group, inputs, outputs, dependencies):
     """Generate template given an OpsGroup.
 
@@ -451,7 +322,7 @@ class Compiler(object):
       templates.append(self._group_to_template(g, inputs, outputs, dependencies))
 
     for op in pipeline.ops.values():
-      templates.append(self._op_to_template(op))
+      templates.append(_op_to_template(op))
     return templates
 
   def _create_volumes(self, pipeline):
