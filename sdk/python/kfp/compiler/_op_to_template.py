@@ -9,7 +9,7 @@ from .. import dsl
 T = TypeVar('T')
 
 
-def _get_pipelineparam_str(payload: str) -> List[str]:
+def _get_pipelineparam(payload: str) -> List[str]:
     """Get a list of pipeline signatures from a string.
     
     Args:
@@ -20,30 +20,37 @@ def _get_pipelineparam_str(payload: str) -> List[str]:
         r'{{pipelineparam:op=([\w\s_-]*);name=([\w\s_-]+);value=(.*?)}}',
         payload)
     return [
-        str(dsl.PipelineParam(x[1], x[0], x[2])) for x in list(set(matches))
+        dsl.PipelineParam(x[1], x[0], x[2]) for x in list(set(matches))
     ]
 
 
-def _sanitize_pipelineparam(param: dsl.PipelineParam):
+def _sanitize_pipelineparam(param: dsl.PipelineParam, in_place=True):
     """Sanitize the name of a PipelineParam.
   
     Args:
       params: a PipelineParam to sanitize
     """
+    if in_place:
+        param.name = K8sHelper.sanitize_k8s_name(param.name)
+        param.op_name = K8sHelper.sanitize_k8s_name(
+            param.op_name) if param.op_name else param.op_name
+        return param
+
     return dsl.PipelineParam(
         K8sHelper.sanitize_k8s_name(param.name),
         K8sHelper.sanitize_k8s_name(param.op_name), param.value)
 
 
 def _sanitize_pipelineparams(
-        params: Union[dsl.PipelineParam, List[dsl.PipelineParam]]):
+        params: Union[dsl.PipelineParam, List[dsl.PipelineParam]],
+        in_place=True):
     """Sanitize the name(s) of a PipelineParam (or a list of PipelineParam).
   
     Args:
       params: a PipelineParam or a list of PipelineParam to sanitize
     """
     params = params if isinstance(params, list) else [params]
-    return [_sanitize_pipelineparam(param) for param in params]
+    return [_sanitize_pipelineparam(param, in_place) for param in params]
 
 
 def _process_obj(obj: Any, map_to_tmpl_var: dict):
@@ -57,12 +64,14 @@ def _process_obj(obj: Any, map_to_tmpl_var: dict):
     # serialized str might be unsanitized
     if isinstance(obj, str):
         # get signature
-        pipeline_params_signs = _get_pipelineparam_str(obj)
-        if not pipeline_params_signs:
+        pipeline_params = _get_pipelineparam(obj)
+        if not pipeline_params:
             return obj
         # replace all unsanitized signature with template var
-        for pattern in pipeline_params_signs:
-            obj = re.sub(pattern, map_to_tmpl_var[pattern], obj)
+        for param in pipeline_params:
+            pattern = str(param)
+            sanitized = str(_sanitize_pipelineparam(param))
+            obj = re.sub(pattern, map_to_tmpl_var[sanitized], obj)
 
     # list
     if isinstance(obj, list):
@@ -88,7 +97,7 @@ def _process_obj(obj: Any, map_to_tmpl_var: dict):
     # k8s_obj
     if hasattr(obj, 'swagger_types') and isinstance(obj.swagger_types, dict):
         # process everything inside recursively
-        for key in obj.swagger_types.keys():
+        for key in obj.swagger_types.keys(): 
             setattr(obj, key, _process_obj(getattr(obj, key), map_to_tmpl_var))
         # return json representation of the k8s obj
         return K8sHelper.convert_k8s_obj_to_json(obj)
@@ -111,10 +120,10 @@ def _process_container_ops(op: dsl.ContainerOp):
     """
 
     # tmp map: unsanitized rpr -> sanitized PipelineParam
-    _map = {str(param): _sanitize_pipelineparam(param) for param in op.inputs}
-
-    # sanitized all inputs (some might come from serialized pipeline param strings)
-    inputs = list(_map.values())
+    _map = {
+        str(param): _sanitize_pipelineparam(param, in_place=True)
+        for param in op.inputs
+    }
 
     # map: unsanitized pipeline param rpr -> template var string
     map_to_tmpl_var = {
@@ -126,12 +135,12 @@ def _process_container_ops(op: dsl.ContainerOp):
     for key in op.attrs_with_pipelineparams:
         setattr(op, key, _process_obj(getattr(op, key), map_to_tmpl_var))
 
-    return op, inputs
+    return op
 
 
 def _parameters_to_json(params: List[dsl.PipelineParam]):
-    _to_json = (lambda param: dict(name=param.name, value=param.value)
-                if param.value else dict(name=param.name))
+    _to_json = (lambda param: dict(name=param.full_name, value=param.value)
+                if param.value else dict(name=param.full_name))
     params = [_to_json(param) for param in params]
     # Sort to make the results deterministic.
     params.sort(key=lambda x: x['name'])
@@ -140,7 +149,8 @@ def _parameters_to_json(params: List[dsl.PipelineParam]):
 
 # TODO: artifacts
 def _inputs_to_json(inputs_params: List[dsl.PipelineParam], _artifacts=None):
-    return {'parameters': _parameters_to_json(inputs_params)}
+    parameters = _parameters_to_json(inputs_params)
+    return {'parameters': parameters } if parameters else None
 
 
 def _outputs_to_json(outputs: Dict[str, dsl.PipelineParam],
@@ -155,7 +165,13 @@ def _outputs_to_json(outputs: Dict[str, dsl.PipelineParam],
             }
         })
     output_parameters.sort(key=lambda x: x['name'])
-    return {'parameters': output_parameters, 'artifacts': output_artifacts}
+    ret = {}
+    if output_parameters:
+        ret['parameters'] = output_parameters
+    if output_artifacts:
+        ret['artifacts'] = output_artifacts
+
+    return ret
 
 
 def _build_conventional_artifact(name):
@@ -179,11 +195,12 @@ def _build_conventional_artifact(name):
         },
     }
 
+
 # TODO: generate argo python classes from swagger and use convert_k8s_obj_to_json
 def _op_to_template(op: dsl.ContainerOp):
     """Generate template given an operator inherited from dsl.ContainerOp."""
 
-    processed_op, sanitized_inputs = _process_container_ops(op)
+    processed_op = _process_container_ops(op)
 
     # default output artifacts
     output_artifacts = [
@@ -194,11 +211,16 @@ def _op_to_template(op: dsl.ContainerOp):
     # workflow template
     template = {
         'name': op.name,
-        'container': K8sHelper.convert_k8s_obj_to_json(op.container),
-        'inputs': _inputs_to_json(sanitized_inputs),
-        'outputs': _outputs_to_json(op.outputs, op.file_outputs,
-                                    output_artifacts)
+        'container': K8sHelper.convert_k8s_obj_to_json(op.container)
     }
+
+    # inputs
+    inputs = _inputs_to_json(op.inputs)
+    if inputs:
+        template['inputs'] = inputs
+
+    template['outputs'] = _outputs_to_json(op.outputs, op.file_outputs,
+                                    output_artifacts)
 
     # node selector
     if processed_op.node_selector:

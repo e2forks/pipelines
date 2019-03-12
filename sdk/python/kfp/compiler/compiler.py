@@ -119,7 +119,6 @@ class Compiler(object):
         # it as input for its parent groups.
         if param.value:
           continue
-
         full_name = self._pipelineparam_full_name(param)
         if param.op_name:
           upstream_op = pipeline.ops[param.op_name]
@@ -213,27 +212,8 @@ class Compiler(object):
     else:
       return str(value_or_reference)
 
-  def _process_args(self, raw_args, argument_inputs):
-    if not raw_args:
-      return []
-    processed_args = list(map(str, raw_args))
-    for i, _ in enumerate(processed_args):
-      # unsanitized_argument_inputs stores a dict: string of sanitized param -> string of unsanitized param
-      matches = []
-      match = re.findall(r'{{pipelineparam:op=([\w\s\_-]*);name=([\w\s\_-]+);value=(.*?)}}', str(processed_args[i]))
-      matches += match
-      unsanitized_argument_inputs = {}
-      for x in list(set(matches)):
-        sanitized_str = str(dsl.PipelineParam(K8sHelper.sanitize_k8s_name(x[1]), K8sHelper.sanitize_k8s_name(x[0]), x[2]))
-        unsanitized_argument_inputs[sanitized_str] = str(dsl.PipelineParam(x[1], x[0], x[2]))
-
-      if argument_inputs:
-        for param in argument_inputs:
-          if str(param) in unsanitized_argument_inputs:
-            full_name = self._pipelineparam_full_name(param)
-            processed_args[i] = re.sub(unsanitized_argument_inputs[str(param)], '{{inputs.parameters.%s}}' % full_name,
-                                       processed_args[i])
-    return processed_args
+  def _op_to_template(self, op):
+    return _op_to_template(op)
 
   def _group_to_template(self, group, inputs, outputs, dependencies):
     """Generate template given an OpsGroup.
@@ -249,15 +229,14 @@ class Compiler(object):
       template['inputs'] = {
         'parameters': template_inputs
       }
-
     # Generate outputs section.
     if outputs.get(group.name, None):
       template_outputs = []
-      for param_name, depentent_name in outputs[group.name]:
+      for param_name, dependent_name in outputs[group.name]:
         template_outputs.append({
           'name': param_name,
           'valueFrom': {
-            'parameter': '{{tasks.%s.outputs.parameters.%s}}' % (depentent_name, param_name)
+            'parameter': '{{tasks.%s.outputs.parameters.%s}}' % (dependent_name, param_name)
           }
         })
       template_outputs.sort(key=lambda x: x['name'])
@@ -334,9 +313,9 @@ class Compiler(object):
         for v in op.volumes:
           # Remove volume duplicates which have the same name
           #TODO: check for duplicity based on the serialized volumes instead of just name.
-          if v.name not in volume_name_set:
-            volume_name_set.add(v.name)
-            volumes.append(K8sHelper.convert_k8s_obj_to_json(v))
+          if v['name'] not in volume_name_set:
+            volume_name_set.add(v['name'])
+            volumes.append(v)
     volumes.sort(key=lambda x: x['name'])
     return volumes
 
@@ -441,7 +420,7 @@ class Compiler(object):
     for op in p.ops.values():
       sanitized_name = K8sHelper.sanitize_k8s_name(op.name)
       op.name = sanitized_name
-      for param in op.inputs + op.argument_inputs:
+      for param in op.inputs: # + op.argument_inputs:
         param.name = K8sHelper.sanitize_k8s_name(param.name)
         if param.op_name:
           param.op_name = K8sHelper.sanitize_k8s_name(param.op_name)
@@ -461,7 +440,6 @@ class Compiler(object):
         op.file_outputs = sanitized_file_outputs
       sanitized_ops[sanitized_name] = op
     p.ops = sanitized_ops
-
     workflow = self._create_pipeline_workflow(args_list_with_defaults, p)
     return workflow
 

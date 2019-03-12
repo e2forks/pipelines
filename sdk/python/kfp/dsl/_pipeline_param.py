@@ -16,8 +16,6 @@
 import re
 from collections import namedtuple
 from typing import List
-
-
 # TODO: Move this to a separate class
 # For now, this identifies a condition with only "==" operator supported.
 ConditionOperator = namedtuple('ConditionOperator', 'operator operand1 operand2')
@@ -39,7 +37,7 @@ def _extract_pipelineparams(payloads: str or List[str]):
   return [PipelineParam(x[1], x[0], x[2]) for x in list(set(matches))]
 
 
-def extract_pipelineparams(payload) -> List[PipelineParam]:
+def extract_pipelineparams(payload) -> List['PipelineParam']:
   """Recursively extract PipelineParam instances or serialized string from a
   k8 definition object (or a list of k8 definition object).
 
@@ -53,6 +51,10 @@ def extract_pipelineparams(payload) -> List[PipelineParam]:
   if not payload:
     return []
 
+  # PipelineParam
+  if isinstance(payload, PipelineParam):
+    return [payload]
+ 
   # str
   if isinstance(payload, str):
     return _extract_pipelineparams(payload)
@@ -62,7 +64,7 @@ def extract_pipelineparams(payload) -> List[PipelineParam]:
     pipeline_params = []
     for item in payload:
       pipeline_params += extract_pipelineparams(item)
-      return list(set(pipeline_params))
+    return list(set(pipeline_params))
 
   # dict
   if isinstance(payload, dict):
@@ -74,7 +76,6 @@ def extract_pipelineparams(payload) -> List[PipelineParam]:
 
   # k8s definition object
   if hasattr(payload, 'swagger_types') and isinstance(payload.swagger_types, dict):
-
     pipeline_params = []
     for key in payload.swagger_types.keys():
       pipeline_params += extract_pipelineparams(getattr(payload, key))

@@ -14,15 +14,13 @@
 
 import re
 from typing import Any, Dict, List, TypeVar, Union
-from kubernetes.client.models import (V1Container, V1EnvVar, V1EnvFromSource, 
-                                      V1SecurityContext, V1Probe, 
-                                      V1ResourceRequirements, V1VolumeDevice, 
-                                      V1VolumeMount, V1ContainerPort, 
-                                      V1Lifecycle)
+from kubernetes.client.models import (
+    V1Container, V1EnvVar, V1EnvFromSource, V1SecurityContext, V1Probe,
+    V1ResourceRequirements, V1VolumeDevice, V1VolumeMount, V1ContainerPort,
+    V1Lifecycle)
 
 from . import _pipeline
 from . import _pipeline_param
-
 
 # generics
 T = TypeVar('T')
@@ -52,6 +50,19 @@ class Container(V1Container):
 
     See https://github.com/kubernetes-client/python/blob/master/kubernetes/client/models/v1_container.py
     """
+    swagger_types = {
+        key: value
+        for key, value in V1Container.swagger_types.items() if key != 'name'
+    }
+
+    attribute_map = {
+        key: value
+        for key, value in V1Container.attribute_map.items() if key != 'name'
+    }
+
+    def __init__(self, image, command, args, **kwargs):
+        super().__init__(
+            name='', image=image, command=command, args=args, **kwargs)
 
     def _validate_memory_string(self, memory_string):
         """Validate a given string is valid for memory request or limit."""
@@ -96,8 +107,8 @@ class Container(V1Container):
         """
 
         self.resources = self.resources or V1ResourceRequirements()
-        self.resources.limits = (self.resources.limits
-                                 or {}).update({resource_name: value})
+        self.resources.limits = self.resources.limits or {}
+        self.resources.limits.update({resource_name: value})
         return self
 
     def add_resource_request(self, resource_name, value):
@@ -109,8 +120,8 @@ class Container(V1Container):
         """
 
         self.resources = self.resources or V1ResourceRequirements()
-        self.resources.requests = (self.resources.requests
-                                   or {}).update({resource_name: value})
+        self.resources.requests = self.resources.requests or {}
+        self.resources.requests.update({resource_name: value})
         return self
 
     def set_memory_request(self, memory):
@@ -425,18 +436,19 @@ class Sidecar(Container):
       attribute_map (dict): The key is attribute name
                             and the value is json key in definition.
     """
-    swagger_types = V1Container.swagger_types.update(
-        {'mirror_volume_mounts': 'bool'})
+    swagger_types = dict(mirror_volume_mounts='bool').update(
+        V1Container.swagger_types)
 
-    attribute_map = V1Container.attribute_map.update(
-        {'mirror_volume_mounts': 'mirrorVolumeMounts'})
+    attribute_map = dict(mirror_volume_mounts='mirrorVolumeMounts').update(
+        V1Container.attribute_map)
 
     def __init__(self,
                  name: str,
                  image: str,
-                 args: StringOrStringList=None,
-                 command: StringOrStringList=None,
-                 mirror_volume_mounts: bool=None):
+                 args: StringOrStringList = None,
+                 command: StringOrStringList = None,
+                 mirror_volume_mounts: bool = None,
+                 **kwargs):
         """Creates a new instance of Sidecar.
 
         Args:
@@ -450,11 +462,12 @@ class Sidecar(Container):
               At container run time the argument will be 'echo param_value'.
         """
         super().__init__(
-            name=name,
             image=image,
             args=as_list(args),
-            command=as_list(command))
+            command=as_list(command),
+            **kwargs)
 
+        self.name = name
         self.mirror_volume_mounts = mirror_volume_mounts
 
     def set_mirror_volume_mounts(self, mirror_volume_mounts=True):
@@ -471,7 +484,7 @@ class Sidecar(Container):
 
         self.mirror_volume_mounts = mirror_volume_mounts
         return self
-    
+
     @property
     def inputs(self):
         """A list of PipelineParam found in the Sidecar object."""
@@ -481,13 +494,13 @@ class Sidecar(Container):
 class ContainerOp(object):
     """Represents an op implemented by a container image."""
 
-    attrs_with_pipelineparams: list = ['_container',
-                                       'node_selector', 
-                                       'volumes', 
-                                       'pod_annotations',
-                                       'pod_labels',
-                                       'num_retries',
-                                       'sidecars']
+    # list of attr that might have pipeline params
+    # except inputs and outputs (which is parsed separatedly as there are no
+    # k8s class for them)
+    attrs_with_pipelineparams = [
+        '_container', 'node_selector', 'volumes', 'pod_annotations',
+        'pod_labels', 'num_retries', 'sidecars'
+    ]
 
     def __init__(self,
                  name: str,
@@ -525,27 +538,56 @@ class ContainerOp(object):
         command = as_list(command)
         arguments = as_list(arguments)
 
-        # k8 container template
-        self._container = Container(image=image, args=arguments, command=command)
-        # for chaining, and returning back to containerops
-        setattr(self._container, "parent", self)
-
         # human_name must exist to construct containerOps name
         self.human_name = name
         # actual name for argo workflow
         self.name = _pipeline.Pipeline.get_default_pipeline().add_op(
             self, is_exit_handler)
 
-        self.is_exit_handler = is_exit_handler
+        # k8 container definition as attr
+        # rather than mixed with containerOp attr
+        self._container = Container(image=image, args=arguments, command=command)
+        # for chaining, and returning back to containerops
+        setattr(self._container, "parent", self)
+
+        # TODO: update dependent functions that use containerOp
+        # proxy old ContainerOp callables to Container
+        ignore_set = frozenset(['to_dict', 'to_str'])
+
+        def _proxy(proxy_attr):
+            """Decorator func to proxy to ContainerOp.container"""
+
+            def _decorated(*args, **kwargs):
+                ret = getattr(self._container, proxy_attr)(*args, **kwargs)
+                if ret == self._container:
+                    return self
+                return ret
+
+            return _decorated
+
+        # iter thru container and attach a proxy func to the container method
+        for attr_to_proxy in dir(self._container):
+            func = getattr(self._container, attr_to_proxy)
+            if hasattr(func,
+                       '__call__') and (attr_to_proxy[0] != '_'
+                                        ) and attr_to_proxy not in ignore_set:
+                setattr(self, attr_to_proxy, _proxy(attr_to_proxy))
+
+        # TODO: proper k8s definition obj
+        # workflow definition attr
         self.node_selector = {}
         self.volumes = []
         self.pod_annotations = {}
         self.pod_labels = {}
         self.num_retries = 0
         self.sidecars = []
-        self.file_outputs = file_outputs
 
+        # container op attr
+        self._inputs = []
+        self.file_outputs = file_outputs
         self.dependent_op_names = []
+        self.is_exit_handler = is_exit_handler
+
         self.outputs = {}
         if file_outputs:
             self.outputs = {
@@ -562,10 +604,18 @@ class ContainerOp(object):
         """List of PipelineParams that will be converted into input parameters
         (io.argoproj.workflow.v1alpha1.Inputs) for the argo workflow.
         """
-        pipelineparams = []
-        for key in self.attrs_with_pipelineparams:
-            pipelineparams += _pipeline_param.extract_pipelineparams(getattr(self, key))
-        return list(set(pipelineparams))
+        if not self._inputs:
+            self._inputs = []
+            for key in self.attrs_with_pipelineparams:
+                self._inputs += [
+                    param for param in _pipeline_param.extract_pipelineparams(
+                        getattr(self, key))
+                ]
+        return self._inputs
+
+    @inputs.setter
+    def inputs(self, value):
+        self._inputs = value
 
     @property
     def container(self):
@@ -616,7 +666,6 @@ class ContainerOp(object):
           For detailed spec, check volume definition
           https://github.com/kubernetes-client/python/blob/master/kubernetes/client/models/v1_volume.py
         """
-
         self.volumes.append(volume)
         return self
 
