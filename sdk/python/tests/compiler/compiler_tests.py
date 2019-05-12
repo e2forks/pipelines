@@ -304,10 +304,18 @@ class TestCompiler(unittest.TestCase):
       with open(os.path.join(test_data_dir, target_yaml), 'r') as f:
         compiled = yaml.safe_load(f)
 
+      with open(os.path.join(test_data_dir, target_yaml), 'r') as f:
+        with open(os.path.join("/pipelines/sdk/python/dist", file_base_name + ".yaml"), 'w') as f2:
+          f2.write(f.read())
+
       self.maxDiff = None
       self.assertEqual(golden, compiled)
     finally:
       shutil.rmtree(tmpdir)
+
+  def test_py_compile_artifact_location(self):
+    """Test configurable artifact location pipeline."""
+    self._test_py_compile_yaml('artifact_location')
 
   def test_py_compile_basic(self):
     """Test basic sequential pipeline."""
